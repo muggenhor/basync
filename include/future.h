@@ -200,17 +200,12 @@ class executor
 public:
   // TODO: can we do this without having a virtual at all?
   virtual void queue(unique_function<void()> func) = 0;
-  template <typename T>
-  auto async(T func) -> future<decltype(func())>;
 };
 
 executor* default_executor();
 
 template <typename T>
-auto async(T func) -> future<decltype(func())>
-{
-  return default_executor()->async(func);
-}
+auto async(T func, executor* exec = default_executor()) -> future<decltype(func())>;
 
 // TODO: make this (functionally) unique_future
 template <typename T>
@@ -257,7 +252,7 @@ public:
     value_set = true;
     cv.notify_all();
     for (auto& p : cbs)
-      p.first->async(std::move(p.second));
+      async(std::move(p.second), p.first);
     cbs.clear();
   }
   void set(const T& value)
@@ -269,7 +264,7 @@ public:
     value_set = true;
     cv.notify_all();
     for (auto& p : cbs)
-      p.first->async(std::move(p.second));
+      async(std::move(p.second), p.first);
     cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
@@ -281,7 +276,7 @@ public:
     value_set  = true;
     cv.notify_all();
     for (auto& p : cbs)
-      p.first->async(std::move(p.second));
+      async(std::move(p.second), p.first);
     cbs.clear();
   }
   T get()
@@ -296,7 +291,7 @@ public:
   {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
-      exec->async(std::move(cb));
+      async(std::move(cb), exec);
     else
       cbs.push_back(std::make_pair(exec, std::move(cb)));
   }
@@ -320,7 +315,7 @@ public:
     value_set = true;
     cv.notify_all();
     for (auto& p : cbs)
-      p.first->async(std::move(p.second));
+      async(std::move(p.second), p.first);
     cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
@@ -332,7 +327,7 @@ public:
     value_set  = true;
     cv.notify_all();
     for (auto& p : cbs)
-      p.first->async(std::move(p.second));
+      async(std::move(p.second), p.first);
     cbs.clear();
   }
   void get() const
@@ -346,7 +341,7 @@ public:
   {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
-      exec->async(std::move(cb));
+      async(std::move(cb), exec);
     else
       cbs.push_back(std::make_pair(exec, std::move(cb)));
   }
@@ -599,9 +594,9 @@ struct async_impl<void>
 }
 
 template <typename T>
-auto executor::async(T func) -> future<decltype(func())>
+auto async(T func, executor* exec) -> future<decltype(func())>
 {
   unique_function<decltype(func())()> f(std::forward<T>(func));
-  return detail::async_impl<decltype(func())>::impl(this, std::move(f));
+  return detail::async_impl<decltype(func())>::impl(exec, std::move(f));
 }
 }
