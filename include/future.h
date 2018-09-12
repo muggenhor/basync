@@ -202,10 +202,10 @@ public:
   virtual void queue(unique_function<void()> func) = 0;
 };
 
-executor* default_executor();
+executor& default_executor();
 
 template <typename F>
-auto async(F&& func, executor* exec = default_executor()) -> future<decltype(func())>;
+auto async(F&& func, executor& exec = default_executor()) -> future<decltype(func())>;
 
 // TODO: make this (functionally) unique_future
 template <typename T>
@@ -215,7 +215,7 @@ public:
   T    get() const;
   bool is_ready() const;
   template <typename F>
-  auto then(F&& func, executor* exec = default_executor())
+  auto then(F&& func, executor& exec = default_executor())
     -> future<decltype(func(std::declval<future<T>>()))>;
 //private:
   future(std::shared_ptr<shared_state<T>> state);
@@ -496,12 +496,12 @@ template <typename T, typename U>
 struct then_impl
 {
   template <typename F>
-  static future<U> impl(future<T>& t, F&& func, executor* exec)
+  static future<U> impl(future<T>& t, F&& func, executor& exec)
   {
     promise<U> value;
     auto       rv = value.get_future();
-    t.state->then([exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
-      exec->queue(
+    t.state->then([&exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
+      exec.queue(
         [t = std::move(t), value = std::move(value), func = std::forward<F>(func)]() mutable {
           try
           {
@@ -521,12 +521,12 @@ template <typename T>
 struct then_impl<T, void>
 {
   template <typename F>
-  static future<void> impl(future<T>& t, F&& func, executor* exec)
+  static future<void> impl(future<T>& t, F&& func, executor& exec)
   {
     promise<void> value;
     auto          rv = value.get_future();
-    t.state->then([exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
-      exec->queue(
+    t.state->then([&exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
+      exec.queue(
         [t = std::move(t), value = std::move(value), func = std::forward<F>(func)]() mutable {
           try
           {
@@ -546,7 +546,7 @@ struct then_impl<T, void>
 
 template <typename T>
 template <typename F>
-auto future<T>::then(F&& func, executor* exec) -> future<decltype(func(std::declval<future<T>>()))>
+auto future<T>::then(F&& func, executor& exec) -> future<decltype(func(std::declval<future<T>>()))>
 {
   return detail::then_impl<T, decltype(func(std::declval<future<T>>()))>::impl(
     *this, std::forward<F>(func), exec);
@@ -557,11 +557,11 @@ template <typename U>
 struct async_impl
 {
   template <typename F>
-  static future<U> impl(executor* exec, F&& func)
+  static future<U> impl(executor& exec, F&& func)
   {
     promise<U> value;
     auto       rv = value.get_future();
-    exec->queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
+    exec.queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
       try
       {
         value.set_value(func());
@@ -579,11 +579,11 @@ template <>
 struct async_impl<void>
 {
   template <typename F>
-  static future<void> impl(executor* exec, F&& func)
+  static future<void> impl(executor& exec, F&& func)
   {
     promise<void> value;
     auto          rv = value.get_future();
-    exec->queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
+    exec.queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
       try
       {
         func();
@@ -600,7 +600,7 @@ struct async_impl<void>
 }
 
 template <typename F>
-auto async(F&& func, executor* exec) -> future<decltype(func())>
+auto async(F&& func, executor& exec) -> future<decltype(func())>
 {
   return detail::async_impl<decltype(func())>::impl(exec, std::forward<F>(func));
 }
