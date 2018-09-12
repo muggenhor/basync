@@ -495,6 +495,7 @@ future<std::vector<future<T>>> when(const std::vector<future<T>>& futures)
   return rv;
 }
 
+namespace detail {
 template <typename T, typename U>
 struct then_impl
 {
@@ -542,15 +543,17 @@ struct then_impl<T, void>
     return std::move(rv);
   }
 };
+}
 
 template <typename T>
 template <typename U>
 auto future<T>::then(U func, executor* exec) -> future<decltype(func(*(future<T>*)0))>
 {
   unique_function<decltype(func(*(future<T>*)0))(const future<T>&)> f(std::forward<U>(func));
-  return then_impl<T, decltype(func(*(future<T>*)0))>::impl(*this, std::move(f), exec);
+  return detail::then_impl<T, decltype(func(*(future<T>*)0))>::impl(*this, std::move(f), exec);
 }
 
+namespace detail {
 template <typename U>
 struct async_impl
 {
@@ -593,11 +596,12 @@ struct async_impl<void>
     return std::move(rv);
   }
 };
+}
 
 template <typename T>
 auto executor::async(T func) -> future<decltype(func())>
 {
   unique_function<decltype(func())()> f(std::forward<T>(func));
-  return async_impl<decltype(func())>::impl(this, std::move(f));
+  return detail::async_impl<decltype(func())>::impl(this, std::move(f));
 }
 }
