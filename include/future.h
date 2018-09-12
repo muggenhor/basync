@@ -18,6 +18,10 @@ class future;
 class executor
 {
 public:
+  // TODO: accept something equivalent to unique_function<void()> instead
+  // NOTE: unique_function should not require stored functors to be copy constructible (only moveable)
+  //       furthermore it should be implicitly constructible from std::function<void()>
+  // TODO: can we do this without having a virtual at all?
   virtual void queue(std::function<void()> func) = 0;
   template <typename T>
   auto async(T func) -> future<decltype(func())>;
@@ -31,6 +35,7 @@ auto async(T func) -> future<decltype(func())>
   return default_executor()->async(func);
 }
 
+// TODO: make this (functionally) unique_future
 template <typename T>
 class future
 {
@@ -45,6 +50,7 @@ public:
   std::shared_ptr<shared_state<T>> state;
 };
 
+// TODO: missing broken_promise here
 struct promise_exception : public std::exception
 {
 };
@@ -208,6 +214,9 @@ template <typename T>
 class promise
 {
 public:
+  // TODO:
+  //   * store shared state by value inside the future
+  //   * make having called get_future() a precondition for the set_XXX functions
   future<T> get_future()
   {
     return future<T>(state);
