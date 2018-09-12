@@ -17,15 +17,68 @@ template <typename R, typename... Args>
 class unique_function<R(Args...)>
 {
 private:
-  template <typename F>
+  template <typename F, typename Alloc>
   struct func_impl;
 
 public:
-  // TODO: work with an allocator too
+  unique_function() = default;
+
+  template <typename Alloc, typename F>
+  unique_function(std::allocator_arg_t, const Alloc& alloc, F&& f)
+  {
+    using impl_type = func_impl<std::decay_t<F>, Alloc>;
+    typename std::allocator_traits<Alloc>::template rebind_alloc<impl_type> a(alloc);
+    using traits = std::allocator_traits<decltype(a)>;
+
+    // Use RAII to deallocate memory when the constructor throws
+    struct mem_handle
+    {
+      ~mem_handle()
+      {
+        if (mem)
+          traits::deallocate(alloc, mem, 1);
+      }
+
+      impl_type* release()
+      {
+        return std::exchange(mem, nullptr);
+      }
+
+      impl_type* get()
+      {
+        return mem;
+      }
+
+      decltype(a)& alloc;
+      impl_type*   mem;
+    } mem{a, traits::allocate(a, 1)};
+
+    traits::construct(a, mem.get(), alloc, std::forward<F>(f));
+    this->f = mem.release();
+  }
+
   template <typename F>
   unique_function(F&& f)
-    : f(new func_impl<std::decay_t<F>>(std::forward<F>(f)))
+    : unique_function(std::allocator_arg, std::allocator<void>(), std::forward<F>(f))
   {
+  }
+
+  ~unique_function()
+  {
+    if (f)
+      f->destroy();
+  }
+
+  unique_function(unique_function&& rhs) noexcept
+    : f(std::exchange(rhs.f, nullptr))
+  {
+  }
+
+  unique_function operator=(unique_function&& rhs) noexcept
+  {
+    if (f)
+      f->destroy();
+    f = std::exchange(rhs.f, nullptr);
   }
 
   R operator()(Args... args) const
@@ -43,25 +96,47 @@ public:
 private:
   struct func_iface
   {
-    virtual ~func_iface()          = default;
-    virtual R invoke(Args... args) = 0;
+    virtual void destroy() noexcept   = 0;
+    virtual R    invoke(Args... args) = 0;
   };
 
   // TODO: do something with SBO here instead
-  std::unique_ptr<func_iface> f;
+  func_iface* f = nullptr;
 
-  template <typename F>
-  class func_impl final : public func_iface
+  template <typename F, typename Alloc>
+  class func_impl final : public func_iface, private Alloc
   {
   public:
-    func_impl(const F& f) noexcept
-      : f(f)
+    func_impl(const Alloc& alloc, const F& f) noexcept(noexcept(F(f)))
+      : Alloc(alloc)
+      , f(f)
     {
     }
 
-    func_impl(F&& f) noexcept
-      : f(std::move(f))
+    func_impl(const Alloc& alloc, F&& f) noexcept(noexcept(F(std::move(f))))
+      : Alloc(alloc)
+      , f(std::move(f))
     {
+    }
+
+    void destroy() noexcept override
+    {
+      typename std::allocator_traits<Alloc>::template rebind_alloc<func_impl> a(*this);
+      using traits = std::allocator_traits<decltype(a)>;
+
+      // Use RAII to deallocate memory, even when the destructor throws
+      struct mem_handle
+      {
+        ~mem_handle()
+        {
+          traits::deallocate(alloc, mem, 1);
+        }
+
+        decltype(a)& alloc;
+        func_impl*   mem;
+      } mem{a, this};
+
+      traits::destroy(a, this);
     }
 
     R invoke(Args... args) override
