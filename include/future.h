@@ -1,12 +1,12 @@
 #pragma once
 
-#include <mutex>
+#include <condition_variable>
+#include <exception>
 #include <functional>
 #include <memory>
-#include <exception>
-#include <vector>
+#include <mutex>
 #include <utility>
-#include <condition_variable>
+#include <vector>
 
 template <typename T>
 class shared_state;
@@ -23,83 +23,94 @@ public:
   auto async(T func) -> future<decltype(func())>;
 };
 
-executor *default_executor();
+executor* default_executor();
 
 template <typename T>
-auto async(T func) -> future<decltype(func())> {
+auto async(T func) -> future<decltype(func())>
+{
   return default_executor()->async(func);
 }
 
 template <typename T>
-class future {
+class future
+{
 public:
-  T get() const;
+  T    get() const;
   bool is_ready() const;
   template <typename U>
-  auto then(U func, executor *exec = default_executor()) -> future<decltype(func(*(future<T>*)0))>;
+  auto then(U func, executor* exec = default_executor()) -> future<decltype(func(*(future<T>*)0))>;
 //private:
   future(std::shared_ptr<shared_state<T>> state);
   friend class promise<T>;
   std::shared_ptr<shared_state<T>> state;
 };
 
-struct promise_exception : public std::exception {
+struct promise_exception : public std::exception
+{
 };
 
-struct promise_already_satisfied : promise_exception {};
+struct promise_already_satisfied : promise_exception
+{
+};
 
 template <typename T>
-class shared_state {
+class shared_state
+{
 public:
   shared_state()
-  : storage(NULL)
+    : storage(NULL)
   {
   }
   ~shared_state()
   {
     delete storage;
   }
-  void set(T &&value) {
+  void set(T&& value)
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       throw promise_already_satisfied();
-    storage = new T(std::move(value));
+    storage   = new T(std::move(value));
     value_set = true;
     cv.notify_all();
-    for (const auto &p : cbs)
+    for (const auto& p : cbs)
       p.first->async(p.second);
     cbs.clear();
   }
-  void set(const T &value) {
+  void set(const T& value)
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       throw promise_already_satisfied();
-    storage = new T(value);
+    storage   = new T(value);
     value_set = true;
     cv.notify_all();
-    for (const auto &p : cbs)
+    for (const auto& p : cbs)
       p.first->async(p.second);
     cbs.clear();
   }
-  void set_error(std::exception_ptr eptr) {
+  void set_error(std::exception_ptr eptr)
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       throw promise_already_satisfied();
     this->eptr = eptr;
-    value_set = true;
+    value_set  = true;
     cv.notify_all();
-    for (const auto &p : cbs)
+    for (const auto& p : cbs)
       p.first->async(p.second);
     cbs.clear();
   }
-  T get() {
+  T get()
+  {
     std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [this]{ return value_set; });
+    cv.wait(lk, [this] { return value_set; });
     if (eptr)
       std::rethrow_exception(eptr);
     return *storage;
   }
-  void then(std::function<void()> cb, executor *exec) {
+  void then(std::function<void()> cb, executor* exec)
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       exec->async(cb);
@@ -107,44 +118,49 @@ public:
       cbs.push_back(std::make_pair(exec, cb));
   }
   std::vector<std::pair<executor*, std::function<void()>>> cbs;
-  T *storage;
-  std::exception_ptr eptr;
-  mutable std::mutex m;
-  mutable std::condition_variable cv;
-  bool value_set = false;
+  T*                                                       storage;
+  std::exception_ptr                                       eptr;
+  mutable std::mutex                                       m;
+  mutable std::condition_variable                          cv;
+  bool                                                     value_set = false;
 };
 
 template <>
-struct shared_state<void> {
+struct shared_state<void>
+{
 public:
-  void set() {
+  void set()
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       throw promise_already_satisfied();
     value_set = true;
     cv.notify_all();
-    for (const auto &p : cbs)
+    for (const auto& p : cbs)
       p.first->async(p.second);
     cbs.clear();
   }
-  void set_error(std::exception_ptr eptr) {
+  void set_error(std::exception_ptr eptr)
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       throw promise_already_satisfied();
     this->eptr = eptr;
-    value_set = true;
+    value_set  = true;
     cv.notify_all();
-    for (const auto &p : cbs)
+    for (const auto& p : cbs)
       p.first->async(p.second);
     cbs.clear();
   }
-  void get() const {
+  void get() const
+  {
     std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [this]{ return value_set; });
+    cv.wait(lk, [this] { return value_set; });
     if (eptr)
       std::rethrow_exception(eptr);
   }
-  void then(std::function<void()> cb, executor *exec) {
+  void then(std::function<void()> cb, executor* exec)
+  {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
       exec->async(cb);
@@ -152,16 +168,17 @@ public:
       cbs.push_back(std::make_pair(exec, cb));
   }
   std::vector<std::pair<executor*, std::function<void()>>> cbs;
-  std::exception_ptr eptr;
-  mutable std::mutex m;
-  mutable std::condition_variable cv;
-  bool value_set = false;
+  std::exception_ptr                                       eptr;
+  mutable std::mutex                                       m;
+  mutable std::condition_variable                          cv;
+  bool                                                     value_set = false;
 };
 
 template <typename T>
-future<T> make_ready_future(T value) {
+future<T> make_ready_future(T value)
+{
   std::shared_ptr<shared_state<T>> state = std::make_shared<shared_state<T>>();
-  future<T> f(state);
+  future<T>                        f(state);
   state->set(std::move(value));
   return f;
 }
@@ -170,53 +187,72 @@ template <typename T>
 class promise;
 
 template <typename T>
-T future<T>::get() const {
+T future<T>::get() const
+{
   return state->get();
 }
 
 template <typename T>
-bool future<T>::is_ready() const {
+bool future<T>::is_ready() const
+{
   return state->value_set;
 }
 
 template <typename T>
 future<T>::future(std::shared_ptr<shared_state<T>> state)
-: state(state)
-{}
+  : state(state)
+{
+}
 
 template <typename T>
-class promise {
+class promise
+{
 public:
-  future<T> get_future() { return future<T>(state); }
-  void set_value(T &&value) {
+  future<T> get_future()
+  {
+    return future<T>(state);
+  }
+  void set_value(T&& value)
+  {
     state->set(std::forward<T>(value));
   }
-  void set_value(const T &value) {
+  void set_value(const T& value)
+  {
     state->set(value);
   }
-  void set_error(std::exception_ptr eptr) {
+  void set_error(std::exception_ptr eptr)
+  {
     state->set_error(eptr);
   }
   std::shared_ptr<shared_state<T>> state = std::make_shared<shared_state<T>>();
 };
 
 template <>
-class promise<void> {
+class promise<void>
+{
 public:
-  future<void> get_future() { return future<void>(state); }
-  void set_value() {
+  future<void> get_future()
+  {
+    return future<void>(state);
+  }
+  void set_value()
+  {
     state->set();
   }
-  void set_error(std::exception_ptr eptr) {
+  void set_error(std::exception_ptr eptr)
+  {
     state->set_error(eptr);
   }
   std::shared_ptr<shared_state<void>> state = std::make_shared<shared_state<void>>();
 };
 
 template <typename T>
-struct all {
-  bool operator()(const std::vector<future<T>> &futures) {
-    for (const auto &f : futures) {
+struct all
+{
+  bool operator()(const std::vector<future<T>>& futures)
+  {
+    for (const auto& f : futures)
+    {
       if (!f.is_ready())
         return false;
     }
@@ -225,9 +261,12 @@ struct all {
 };
 
 template <typename T>
-struct any {
-  bool operator()(const std::vector<future<T>> &futures) {
-    for (const auto &f : futures) {
+struct any
+{
+  bool operator()(const std::vector<future<T>>& futures)
+  {
+    for (const auto& f : futures)
+    {
       if (f.is_ready())
         return true;
     }
@@ -236,19 +275,21 @@ struct any {
 };
 
 template <template <typename> class P, typename T>
-future<std::vector<future<T>>> when(const std::vector<future<T>> &futures) {
-  struct when_holder {
-    std::vector<future<T>> futures;
-    P<T> pred;
-    std::mutex m;
+future<std::vector<future<T>>> when(const std::vector<future<T>>& futures)
+{
+  struct when_holder
+  {
+    std::vector<future<T>>          futures;
+    P<T>                            pred;
+    std::mutex                      m;
     promise<std::vector<future<T>>> prom;
-    bool value_set;
-    when_holder(std::vector<future<T>> v) 
-    : futures(v)
+    bool                            value_set;
+    when_holder(std::vector<future<T>> v)
+      : futures(v)
     {
       value_set = false;
     }
-    void updatePromise() 
+    void updatePromise()
     {
       std::lock_guard<std::mutex> lock(m);
       if (!value_set && pred(futures))
@@ -259,10 +300,9 @@ future<std::vector<future<T>>> when(const std::vector<future<T>> &futures) {
     }
   };
   std::shared_ptr<when_holder> inst = std::make_shared<when_holder>(futures);
-  for (auto &f : inst->futures) {
-    f.then([inst](const future<T> &) {
-      inst->updatePromise();
-    });
+  for (auto& f : inst->futures)
+  {
+    f.then([inst](const future<T>&) { inst->updatePromise(); });
   }
   future<std::vector<future<T>>> rv = inst->prom.get_future();
   inst->updatePromise();
@@ -270,56 +310,74 @@ future<std::vector<future<T>>> when(const std::vector<future<T>> &futures) {
 }
 
 template <typename T, typename U>
-struct then_impl {
-  static future<U> impl(future<T> t, std::function<U(const future<T>&)> func, executor *exec)
+struct then_impl
+{
+  static future<U> impl(future<T> t, std::function<U(const future<T>&)> func, executor* exec)
   {
     std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
-    future<U> rv = value->get_future();
-    t.state->then([t, value, func]{
-      try {
-        value->set_value(func(t));
-      } catch (...) {
-        value->set_error(std::current_exception());
-      }
-    }, exec);
+    future<U>                   rv    = value->get_future();
+    t.state->then(
+      [t, value, func] {
+        try
+        {
+          value->set_value(func(t));
+        }
+        catch (...)
+        {
+          value->set_error(std::current_exception());
+        }
+      },
+      exec);
     return std::move(rv);
   }
 };
 
 template <typename T>
-struct then_impl<T, void> {
-  static future<void> impl(future<T> t, std::function<void(const future<T>&)> func, executor *exec)
+struct then_impl<T, void>
+{
+  static future<void> impl(future<T> t, std::function<void(const future<T>&)> func, executor* exec)
   {
     std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
-    future<void> rv = value->get_future();
-    t.state->then([t, value, func]{ 
-      try {
-        func(t);
-        value->set_value(); 
-      } catch (...) {
-        value->set_error(std::current_exception());
-      }
-    }, exec);
+    future<void>                   rv    = value->get_future();
+    t.state->then(
+      [t, value, func] {
+        try
+        {
+          func(t);
+          value->set_value();
+        }
+        catch (...)
+        {
+          value->set_error(std::current_exception());
+        }
+      },
+      exec);
     return std::move(rv);
   }
 };
 
 template <typename T>
 template <typename U>
-auto future<T>::then(U func, executor *exec) -> future<decltype(func(*(future<T>*)0))> {
-  std::function<decltype(func(*(future<T>*)0))(const future<T> &)> f = func;
+auto future<T>::then(U func, executor* exec) -> future<decltype(func(*(future<T>*)0))>
+{
+  std::function<decltype(func(*(future<T>*)0))(const future<T>&)> f = func;
   return then_impl<T, decltype(func(*(future<T>*)0))>::impl(*this, f, exec);
 }
 
 template <typename U>
-struct async_impl {
-  static future<U> impl(executor *exec, std::function<U()> func) {
+struct async_impl
+{
+  static future<U> impl(executor* exec, std::function<U()> func)
+  {
     std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
-    future<U> rv = value->get_future();
-    exec->queue([value, func]{
-      try {
+    future<U>                   rv    = value->get_future();
+    exec->queue([value, func] {
+      try
+      {
         value->set_value(func());
-      } catch (...) {
+      }
+      catch (...)
+      {
         value->set_error(std::current_exception());
       }
     });
@@ -328,15 +386,20 @@ struct async_impl {
 };
 
 template <>
-struct async_impl<void> {
-  static future<void> impl(executor *exec, std::function<void()> func) {
+struct async_impl<void>
+{
+  static future<void> impl(executor* exec, std::function<void()> func)
+  {
     std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
-    future<void> rv = value->get_future();
-    exec->queue([value, func]{
-      try {
+    future<void>                   rv    = value->get_future();
+    exec->queue([value, func] {
+      try
+      {
         func();
         value->set_value();
-      } catch (...) {
+      }
+      catch (...)
+      {
         value->set_error(std::current_exception());
       }
     });
@@ -345,7 +408,8 @@ struct async_impl<void> {
 };
 
 template <typename T>
-auto executor::async(T func) -> future<decltype(func())> {
+auto executor::async(T func) -> future<decltype(func())>
+{
   std::function<decltype(func())()> f = func;
   return async_impl<decltype(func())>::impl(this, f);
 }
