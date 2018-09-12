@@ -149,6 +149,45 @@ private:
   };
 };
 
+namespace detail {
+template <typename>
+struct function_guide_helper
+{
+};
+
+template <typename R, typename F, bool is_noexcept, typename... Args>
+struct function_guide_helper<R (F::*)(Args...) noexcept(is_noexcept)>
+{
+  using type = R(Args...);
+};
+
+template <typename R, typename F, bool is_noexcept, typename... Args>
+struct function_guide_helper<R (F::*)(Args...) & noexcept(is_noexcept)>
+{
+  using type = R(Args...);
+};
+
+template <typename R, typename F, bool is_noexcept, typename... Args>
+struct function_guide_helper<R (F::*)(Args...) const noexcept(is_noexcept)>
+{
+  using type = R(Args...);
+};
+
+template <typename R, typename F, bool is_noexcept, typename... Args>
+struct function_guide_helper<R (F::*)(Args...) const& noexcept(is_noexcept)>
+{
+  using type = R(Args...);
+};
+}
+
+template <typename R, typename... Args>
+unique_function(R (*)(Args...)) -> unique_function<R(Args...)>;
+
+template <
+  typename F,
+  typename Signature = typename detail::function_guide_helper<decltype(&F::operator())>::type>
+unique_function(F) -> unique_function<Signature>;
+
 template <typename T>
 class shared_state;
 template <typename T>
