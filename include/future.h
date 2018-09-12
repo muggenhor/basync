@@ -198,11 +198,8 @@ class future;
 class executor
 {
 public:
-  // TODO: accept something equivalent to unique_function<void()> instead
-  // NOTE: unique_function should not require stored functors to be copy constructible (only moveable)
-  //       furthermore it should be implicitly constructible from std::function<void()>
   // TODO: can we do this without having a virtual at all?
-  virtual void queue(std::function<void()> func) = 0;
+  virtual void queue(unique_function<void()> func) = 0;
   template <typename T>
   auto async(T func) -> future<decltype(func())>;
 };
@@ -259,8 +256,8 @@ public:
     storage   = new T(std::move(value));
     value_set = true;
     cv.notify_all();
-    for (const auto& p : cbs)
-      p.first->async(p.second);
+    for (auto& p : cbs)
+      p.first->async(std::move(p.second));
     cbs.clear();
   }
   void set(const T& value)
@@ -271,8 +268,8 @@ public:
     storage   = new T(value);
     value_set = true;
     cv.notify_all();
-    for (const auto& p : cbs)
-      p.first->async(p.second);
+    for (auto& p : cbs)
+      p.first->async(std::move(p.second));
     cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
@@ -283,8 +280,8 @@ public:
     this->eptr = eptr;
     value_set  = true;
     cv.notify_all();
-    for (const auto& p : cbs)
-      p.first->async(p.second);
+    for (auto& p : cbs)
+      p.first->async(std::move(p.second));
     cbs.clear();
   }
   T get()
@@ -295,20 +292,20 @@ public:
       std::rethrow_exception(eptr);
     return *storage;
   }
-  void then(std::function<void()> cb, executor* exec)
+  void then(unique_function<void()> cb, executor* exec)
   {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
-      exec->async(cb);
+      exec->async(std::move(cb));
     else
-      cbs.push_back(std::make_pair(exec, cb));
+      cbs.push_back(std::make_pair(exec, std::move(cb)));
   }
-  std::vector<std::pair<executor*, std::function<void()>>> cbs;
-  T*                                                       storage;
-  std::exception_ptr                                       eptr;
-  mutable std::mutex                                       m;
-  mutable std::condition_variable                          cv;
-  bool                                                     value_set = false;
+  std::vector<std::pair<executor*, unique_function<void()>>> cbs;
+  T*                                                         storage;
+  std::exception_ptr                                         eptr;
+  mutable std::mutex                                         m;
+  mutable std::condition_variable                            cv;
+  bool                                                       value_set = false;
 };
 
 template <>
@@ -322,8 +319,8 @@ public:
       throw promise_already_satisfied();
     value_set = true;
     cv.notify_all();
-    for (const auto& p : cbs)
-      p.first->async(p.second);
+    for (auto& p : cbs)
+      p.first->async(std::move(p.second));
     cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
@@ -334,8 +331,8 @@ public:
     this->eptr = eptr;
     value_set  = true;
     cv.notify_all();
-    for (const auto& p : cbs)
-      p.first->async(p.second);
+    for (auto& p : cbs)
+      p.first->async(std::move(p.second));
     cbs.clear();
   }
   void get() const
@@ -345,19 +342,19 @@ public:
     if (eptr)
       std::rethrow_exception(eptr);
   }
-  void then(std::function<void()> cb, executor* exec)
+  void then(unique_function<void()> cb, executor* exec)
   {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
-      exec->async(cb);
+      exec->async(std::move(cb));
     else
-      cbs.push_back(std::make_pair(exec, cb));
+      cbs.push_back(std::make_pair(exec, std::move(cb)));
   }
-  std::vector<std::pair<executor*, std::function<void()>>> cbs;
-  std::exception_ptr                                       eptr;
-  mutable std::mutex                                       m;
-  mutable std::condition_variable                          cv;
-  bool                                                     value_set = false;
+  std::vector<std::pair<executor*, unique_function<void()>>> cbs;
+  std::exception_ptr                                         eptr;
+  mutable std::mutex                                         m;
+  mutable std::condition_variable                            cv;
+  bool                                                       value_set = false;
 };
 
 template <typename T>
@@ -501,12 +498,12 @@ future<std::vector<future<T>>> when(const std::vector<future<T>>& futures)
 template <typename T, typename U>
 struct then_impl
 {
-  static future<U> impl(future<T> t, std::function<U(const future<T>&)> func, executor* exec)
+  static future<U> impl(future<T> t, unique_function<U(const future<T>&)> func, executor* exec)
   {
     std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
     future<U>                   rv    = value->get_future();
     t.state->then(
-      [t, value, func] {
+      [t, value, func = std::move(func)] {
         try
         {
           value->set_value(func(t));
@@ -524,12 +521,13 @@ struct then_impl
 template <typename T>
 struct then_impl<T, void>
 {
-  static future<void> impl(future<T> t, std::function<void(const future<T>&)> func, executor* exec)
+  static future<void>
+  impl(future<T> t, unique_function<void(const future<T>&)> func, executor* exec)
   {
     std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
     future<void>                   rv    = value->get_future();
     t.state->then(
-      [t, value, func] {
+      [t, value, func = std::move(func)] {
         try
         {
           func(t);
@@ -549,18 +547,18 @@ template <typename T>
 template <typename U>
 auto future<T>::then(U func, executor* exec) -> future<decltype(func(*(future<T>*)0))>
 {
-  std::function<decltype(func(*(future<T>*)0))(const future<T>&)> f = func;
-  return then_impl<T, decltype(func(*(future<T>*)0))>::impl(*this, f, exec);
+  unique_function<decltype(func(*(future<T>*)0))(const future<T>&)> f(std::forward<U>(func));
+  return then_impl<T, decltype(func(*(future<T>*)0))>::impl(*this, std::move(f), exec);
 }
 
 template <typename U>
 struct async_impl
 {
-  static future<U> impl(executor* exec, std::function<U()> func)
+  static future<U> impl(executor* exec, unique_function<U()> func)
   {
     std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
     future<U>                   rv    = value->get_future();
-    exec->queue([value, func] {
+    exec->queue([value, func = std::move(func)] {
       try
       {
         value->set_value(func());
@@ -577,11 +575,11 @@ struct async_impl
 template <>
 struct async_impl<void>
 {
-  static future<void> impl(executor* exec, std::function<void()> func)
+  static future<void> impl(executor* exec, unique_function<void()> func)
   {
     std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
     future<void>                   rv    = value->get_future();
-    exec->queue([value, func] {
+    exec->queue([value, func = std::move(func)] {
       try
       {
         func();
@@ -599,7 +597,7 @@ struct async_impl<void>
 template <typename T>
 auto executor::async(T func) -> future<decltype(func())>
 {
-  std::function<decltype(func())()> f = func;
-  return async_impl<decltype(func())>::impl(this, f);
+  unique_function<decltype(func())()> f(std::forward<T>(func));
+  return async_impl<decltype(func())>::impl(this, std::move(f));
 }
 }
