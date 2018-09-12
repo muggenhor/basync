@@ -10,6 +10,70 @@
 
 namespace basync {
 
+template <typename Signature>
+class unique_function;
+
+template <typename R, typename... Args>
+class unique_function<R(Args...)>
+{
+private:
+  template <typename F>
+  struct func_impl;
+
+public:
+  // TODO: work with an allocator too
+  template <typename F>
+  unique_function(F&& f)
+    : f(new func_impl<std::decay_t<F>>(std::forward<F>(f)))
+  {
+  }
+
+  R operator()(Args... args) const
+  {
+    if (!f)
+      throw std::bad_function_call();
+    return f->invoke(std::forward<Args>(args)...);
+  }
+
+  constexpr explicit operator bool() const
+  {
+    return static_cast<bool>(f);
+  }
+
+private:
+  struct func_iface
+  {
+    virtual ~func_iface()          = default;
+    virtual R invoke(Args... args) = 0;
+  };
+
+  // TODO: do something with SBO here instead
+  std::unique_ptr<func_iface> f;
+
+  template <typename F>
+  class func_impl final : public func_iface
+  {
+  public:
+    func_impl(const F& f) noexcept
+      : f(f)
+    {
+    }
+
+    func_impl(F&& f) noexcept
+      : f(std::move(f))
+    {
+    }
+
+    R invoke(Args... args) override
+    {
+      return f(std::forward<Args>(args)...);
+    }
+
+  private:
+    F f;
+  };
+};
+
 template <typename T>
 class shared_state;
 template <typename T>
