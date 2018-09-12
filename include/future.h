@@ -204,8 +204,8 @@ public:
 
 executor* default_executor();
 
-template <typename T>
-auto async(T func, executor* exec = default_executor()) -> future<decltype(func())>;
+template <typename F>
+auto async(F&& func, executor* exec = default_executor()) -> future<decltype(func())>;
 
 // TODO: make this (functionally) unique_future
 template <typename T>
@@ -214,8 +214,9 @@ class future
 public:
   T    get() const;
   bool is_ready() const;
-  template <typename U>
-  auto then(U func, executor* exec = default_executor()) -> future<decltype(func(*(future<T>*)0))>;
+  template <typename F>
+  auto then(F&& func, executor* exec = default_executor())
+    -> future<decltype(func(std::declval<future<T>>()))>;
 //private:
   future(std::shared_ptr<shared_state<T>> state);
   friend class promise<T>;
@@ -494,12 +495,13 @@ namespace detail {
 template <typename T, typename U>
 struct then_impl
 {
-  static future<U> impl(future<T> t, unique_function<U(const future<T>&)> func, executor* exec)
+  template <typename F>
+  static future<U> impl(future<T> t, F&& func, executor* exec)
   {
     std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
     future<U>                   rv    = value->get_future();
     t.state->then(
-      [t, value, func = std::move(func)] {
+      [t, value, func = std::forward<F>(func)] {
         try
         {
           value->set_value(func(t));
@@ -517,13 +519,13 @@ struct then_impl
 template <typename T>
 struct then_impl<T, void>
 {
-  static future<void>
-  impl(future<T> t, unique_function<void(const future<T>&)> func, executor* exec)
+  template <typename F>
+  static future<void> impl(future<T> t, F&& func, executor* exec)
   {
     std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
     future<void>                   rv    = value->get_future();
     t.state->then(
-      [t, value, func = std::move(func)] {
+      [t, value, func = std::forward<F>(func)] {
         try
         {
           func(t);
@@ -541,22 +543,23 @@ struct then_impl<T, void>
 }
 
 template <typename T>
-template <typename U>
-auto future<T>::then(U func, executor* exec) -> future<decltype(func(*(future<T>*)0))>
+template <typename F>
+auto future<T>::then(F&& func, executor* exec) -> future<decltype(func(std::declval<future<T>>()))>
 {
-  unique_function<decltype(func(*(future<T>*)0))(const future<T>&)> f(std::forward<U>(func));
-  return detail::then_impl<T, decltype(func(*(future<T>*)0))>::impl(*this, std::move(f), exec);
+  return detail::then_impl<T, decltype(func(std::declval<future<T>>()))>::impl(
+    *this, std::forward<F>(func), exec);
 }
 
 namespace detail {
 template <typename U>
 struct async_impl
 {
-  static future<U> impl(executor* exec, unique_function<U()> func)
+  template <typename F>
+  static future<U> impl(executor* exec, F&& func)
   {
     std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
     future<U>                   rv    = value->get_future();
-    exec->queue([value, func = std::move(func)] {
+    exec->queue([value, func = std::forward<F>(func)] {
       try
       {
         value->set_value(func());
@@ -573,11 +576,12 @@ struct async_impl
 template <>
 struct async_impl<void>
 {
-  static future<void> impl(executor* exec, unique_function<void()> func)
+  template <typename F>
+  static future<void> impl(executor* exec, F&& func)
   {
     std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
     future<void>                   rv    = value->get_future();
-    exec->queue([value, func = std::move(func)] {
+    exec->queue([value, func = std::forward<F>(func)] {
       try
       {
         func();
@@ -593,10 +597,9 @@ struct async_impl<void>
 };
 }
 
-template <typename T>
-auto async(T func, executor* exec) -> future<decltype(func())>
+template <typename F>
+auto async(F&& func, executor* exec) -> future<decltype(func())>
 {
-  unique_function<decltype(func())()> f(std::forward<T>(func));
-  return detail::async_impl<decltype(func())>::impl(exec, std::move(f));
+  return detail::async_impl<decltype(func())>::impl(exec, std::forward<F>(func));
 }
 }
