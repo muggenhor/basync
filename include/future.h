@@ -1,5 +1,4 @@
-#ifndef FUTURE_H
-#define FUTURE_H
+#pragma once
 
 #include <mutex>
 #include <functional>
@@ -350,7 +349,3 @@ auto executor::async(T func) -> future<decltype(func())> {
   std::function<decltype(func())()> f = func;
   return async_impl<decltype(func())>::impl(this, f);
 }
-
-#endif
-
-
