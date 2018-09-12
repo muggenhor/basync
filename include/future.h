@@ -356,10 +356,9 @@ public:
 template <typename T>
 future<T> make_ready_future(T value)
 {
-  std::shared_ptr<shared_state<T>> state = std::make_shared<shared_state<T>>();
-  future<T>                        f(state);
+  auto state = std::make_shared<shared_state<T>>();
   state->set(std::move(value));
-  return f;
+  return future<T>(std::move(state));
 }
 
 template <typename T>
@@ -457,7 +456,7 @@ struct any
 };
 
 template <template <typename> class P, typename T>
-future<std::vector<future<T>>> when(const std::vector<future<T>>& futures)
+future<std::vector<future<T>>> when(std::vector<future<T>> futures)
 {
   struct when_holder
   {
@@ -465,11 +464,10 @@ future<std::vector<future<T>>> when(const std::vector<future<T>>& futures)
     P<T>                            pred;
     std::mutex                      m;
     promise<std::vector<future<T>>> prom;
-    bool                            value_set;
+    bool                            value_set = false;
     when_holder(std::vector<future<T>> v)
-      : futures(v)
+      : futures(std::move(v))
     {
-      value_set = false;
     }
     void updatePromise()
     {
@@ -481,13 +479,13 @@ future<std::vector<future<T>>> when(const std::vector<future<T>>& futures)
       }
     }
   };
-  std::shared_ptr<when_holder> inst = std::make_shared<when_holder>(futures);
+  auto inst = std::make_shared<when_holder>(std::move(futures));
+  auto rv   = inst->prom.get_future();
+  inst->updatePromise();
   for (auto& f : inst->futures)
   {
-    f.then([inst](const future<T>&) { inst->updatePromise(); });
+    f.then([inst = std::move(inst)](const future<T>&) { inst->updatePromise(); });
   }
-  future<std::vector<future<T>>> rv = inst->prom.get_future();
-  inst->updatePromise();
   return rv;
 }
 
