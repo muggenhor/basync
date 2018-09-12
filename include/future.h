@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+namespace basync {
+
 template <typename T>
 class shared_state;
 template <typename T>
@@ -421,4 +423,5 @@ auto executor::async(T func) -> future<decltype(func())>
 {
   std::function<decltype(func())()> f = func;
   return async_impl<decltype(func())>::impl(this, f);
+}
 }
