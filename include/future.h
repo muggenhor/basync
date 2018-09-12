@@ -252,8 +252,8 @@ public:
     storage   = new T(std::move(value));
     value_set = true;
     cv.notify_all();
-    for (auto& p : cbs)
-      async(std::move(p.second), p.first);
+    for (auto& cb : cbs)
+      cb();
     cbs.clear();
   }
   void set(const T& value)
@@ -264,8 +264,8 @@ public:
     storage   = new T(value);
     value_set = true;
     cv.notify_all();
-    for (auto& p : cbs)
-      async(std::move(p.second), p.first);
+    for (auto& cb : cbs)
+      cb();
     cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
@@ -276,8 +276,8 @@ public:
     this->eptr = eptr;
     value_set  = true;
     cv.notify_all();
-    for (auto& p : cbs)
-      async(std::move(p.second), p.first);
+    for (auto& cb : cbs)
+      cb();
     cbs.clear();
   }
   T get()
@@ -288,20 +288,20 @@ public:
       std::rethrow_exception(eptr);
     return *storage;
   }
-  void then(unique_function<void()> cb, executor* exec)
+  void then(unique_function<void()> cb)
   {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
-      async(std::move(cb), exec);
+      cb();
     else
-      cbs.push_back(std::make_pair(exec, std::move(cb)));
+      cbs.push_back(std::move(cb));
   }
-  std::vector<std::pair<executor*, unique_function<void()>>> cbs;
-  T*                                                         storage;
-  std::exception_ptr                                         eptr;
-  mutable std::mutex                                         m;
-  mutable std::condition_variable                            cv;
-  bool                                                       value_set = false;
+  std::vector<unique_function<void()>> cbs;
+  T*                                   storage;
+  std::exception_ptr                   eptr;
+  mutable std::mutex                   m;
+  mutable std::condition_variable      cv;
+  bool                                 value_set = false;
 };
 
 template <>
@@ -315,8 +315,8 @@ public:
       throw promise_already_satisfied();
     value_set = true;
     cv.notify_all();
-    for (auto& p : cbs)
-      async(std::move(p.second), p.first);
+    for (auto& cb : cbs)
+      cb();
     cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
@@ -327,8 +327,8 @@ public:
     this->eptr = eptr;
     value_set  = true;
     cv.notify_all();
-    for (auto& p : cbs)
-      async(std::move(p.second), p.first);
+    for (auto& cb : cbs)
+      cb();
     cbs.clear();
   }
   void get() const
@@ -338,19 +338,19 @@ public:
     if (eptr)
       std::rethrow_exception(eptr);
   }
-  void then(unique_function<void()> cb, executor* exec)
+  void then(unique_function<void()> cb)
   {
     std::unique_lock<std::mutex> lk(m);
     if (value_set)
-      async(std::move(cb), exec);
+      cb();
     else
-      cbs.push_back(std::make_pair(exec, std::move(cb)));
+      cbs.push_back(std::move(cb));
   }
-  std::vector<std::pair<executor*, unique_function<void()>>> cbs;
-  std::exception_ptr                                         eptr;
-  mutable std::mutex                                         m;
-  mutable std::condition_variable                            cv;
-  bool                                                       value_set = false;
+  std::vector<unique_function<void()>> cbs;
+  std::exception_ptr                   eptr;
+  mutable std::mutex                   m;
+  mutable std::condition_variable      cv;
+  bool                                 value_set = false;
 };
 
 template <typename T>
@@ -496,22 +496,23 @@ template <typename T, typename U>
 struct then_impl
 {
   template <typename F>
-  static future<U> impl(future<T> t, F&& func, executor* exec)
+  static future<U> impl(future<T>& t, F&& func, executor* exec)
   {
     promise<U> value;
     auto       rv = value.get_future();
-    t.state->then(
-      [t, value = std::move(value), func = std::forward<F>(func)]() mutable {
-        try
-        {
-          value.set_value(func(t));
-        }
-        catch (...)
-        {
-          value.set_error(std::current_exception());
-        }
-      },
-      exec);
+    t.state->then([exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
+      exec->queue(
+        [t = std::move(t), value = std::move(value), func = std::forward<F>(func)]() mutable {
+          try
+          {
+            value.set_value(func(std::move(t)));
+          }
+          catch (...)
+          {
+            value.set_error(std::current_exception());
+          }
+        });
+    });
     return rv;
   }
 };
@@ -520,23 +521,24 @@ template <typename T>
 struct then_impl<T, void>
 {
   template <typename F>
-  static future<void> impl(future<T> t, F&& func, executor* exec)
+  static future<void> impl(future<T>& t, F&& func, executor* exec)
   {
     promise<void> value;
     auto          rv = value.get_future();
-    t.state->then(
-      [t, value = std::move(value), func = std::forward<F>(func)]() mutable {
-        try
-        {
-          func(t);
-          value.set_value();
-        }
-        catch (...)
-        {
-          value.set_error(std::current_exception());
-        }
-      },
-      exec);
+    t.state->then([exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
+      exec->queue(
+        [t = std::move(t), value = std::move(value), func = std::forward<F>(func)]() mutable {
+          try
+          {
+            func(std::move(t));
+            value.set_value();
+          }
+          catch (...)
+          {
+            value.set_error(std::current_exception());
+          }
+        });
+    });
     return rv;
   }
 };
