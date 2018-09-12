@@ -498,21 +498,21 @@ struct then_impl
   template <typename F>
   static future<U> impl(future<T> t, F&& func, executor* exec)
   {
-    std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
-    future<U>                   rv    = value->get_future();
+    promise<U> value;
+    auto       rv = value.get_future();
     t.state->then(
-      [t, value, func = std::forward<F>(func)] {
+      [t, value = std::move(value), func = std::forward<F>(func)]() mutable {
         try
         {
-          value->set_value(func(t));
+          value.set_value(func(t));
         }
         catch (...)
         {
-          value->set_error(std::current_exception());
+          value.set_error(std::current_exception());
         }
       },
       exec);
-    return std::move(rv);
+    return rv;
   }
 };
 
@@ -522,22 +522,22 @@ struct then_impl<T, void>
   template <typename F>
   static future<void> impl(future<T> t, F&& func, executor* exec)
   {
-    std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
-    future<void>                   rv    = value->get_future();
+    promise<void> value;
+    auto          rv = value.get_future();
     t.state->then(
-      [t, value, func = std::forward<F>(func)] {
+      [t, value = std::move(value), func = std::forward<F>(func)]() mutable {
         try
         {
           func(t);
-          value->set_value();
+          value.set_value();
         }
         catch (...)
         {
-          value->set_error(std::current_exception());
+          value.set_error(std::current_exception());
         }
       },
       exec);
-    return std::move(rv);
+    return rv;
   }
 };
 }
@@ -557,19 +557,19 @@ struct async_impl
   template <typename F>
   static future<U> impl(executor* exec, F&& func)
   {
-    std::shared_ptr<promise<U>> value = std::make_shared<promise<U>>();
-    future<U>                   rv    = value->get_future();
-    exec->queue([value, func = std::forward<F>(func)] {
+    promise<U> value;
+    auto       rv = value.get_future();
+    exec->queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
       try
       {
-        value->set_value(func());
+        value.set_value(func());
       }
       catch (...)
       {
-        value->set_error(std::current_exception());
+        value.set_error(std::current_exception());
       }
     });
-    return std::move(rv);
+    return rv;
   }
 };
 
@@ -579,20 +579,20 @@ struct async_impl<void>
   template <typename F>
   static future<void> impl(executor* exec, F&& func)
   {
-    std::shared_ptr<promise<void>> value = std::make_shared<promise<void>>();
-    future<void>                   rv    = value->get_future();
-    exec->queue([value, func = std::forward<F>(func)] {
+    promise<void> value;
+    auto          rv = value.get_future();
+    exec->queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
       try
       {
         func();
-        value->set_value();
+        value.set_value();
       }
       catch (...)
       {
-        value->set_error(std::current_exception());
+        value.set_error(std::current_exception());
       }
     });
-    return std::move(rv);
+    return rv;
   }
 };
 }
