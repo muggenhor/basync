@@ -480,77 +480,72 @@ private:
 };
 
 template <typename T>
-struct all
+future<std::vector<future<T>>> when_all(std::vector<future<T>> futures,
+                                        executor&              exec = default_executor())
 {
-  bool operator()(const std::vector<future<T>>& futures)
+  struct when_all_processor
   {
-    for (const auto& f : futures)
+    std::vector<future<T>> futures;
+    executor&              exec;
+    size_t                 cur = 0;
+
+    std::vector<future<T>> operator()(future<T> f)
     {
-      if (!f.is_ready())
-        return false;
+      futures[cur++] = std::move(f);
+      return (*this)().get();
     }
-    return true;
-  }
-};
+
+    future<std::vector<future<T>>> operator()()
+    {
+      if (cur == futures.size())
+        return make_ready_future(std::move(futures));
+
+      return std::move(futures[cur]).then(std::move(*this), exec);
+    }
+  };
+
+  return when_all_processor{std::move(futures), exec}();
+}
 
 template <typename T>
-struct any
+future<std::vector<future<T>>> when_any(std::vector<future<T>> futures,
+                                        executor&              exec = default_executor())
 {
-  bool operator()(const std::vector<future<T>>& futures)
-  {
-    for (const auto& f : futures)
-    {
-      if (f.is_ready())
-        return true;
-    }
-    return false;
-  }
-};
+  if (futures.empty())
+    return make_ready_future(std::move(futures));
 
-template <template <typename> class P, typename T>
-future<std::vector<future<T>>> when(std::vector<future<T>> futures)
-{
-  struct when_holder
+  struct when_any_holder
   {
     std::vector<future<T>>          futures;
-    P<T>                            pred;
     std::mutex                      m;
     promise<std::vector<future<T>>> prom;
     bool                            value_set = false;
-    when_holder(std::vector<future<T>> v)
-      : futures(std::move(v))
+
+    when_any_holder(std::vector<future<T>> futures) noexcept(
+      std::is_nothrow_move_constructible_v<std::vector<future<T>>>)
+      : futures(std::move(futures))
     {
-    }
-    void updatePromise()
-    {
-      std::lock_guard<std::mutex> lock(m);
-      if (!value_set && pred(futures))
-      {
-        prom.set_value(std::move(futures));
-        value_set = true;
-      }
     }
   };
-  auto inst = std::make_shared<when_holder>(std::move(futures));
+
+  auto inst = std::make_shared<when_any_holder>(std::move(futures));
   auto rv   = inst->prom.get_future();
-  inst->updatePromise();
   for (auto& f : inst->futures)
   {
-    std::move(f).then([inst = std::move(inst)](const future<T>&) { inst->updatePromise(); });
+    f = std::move(f).then([inst, &exec](future<T> f) mutable {
+      std::lock_guard lock(inst->m);
+      if (!std::exchange(inst->value_set, true))
+      {
+        exec.queue([inst = std::move(inst)] {
+          std::lock_guard lock(inst->m);
+          inst->prom.set_value(std::move(inst->futures));
+        });
+      }
+      return std::move(f).get();
+    });
   }
+
   return rv;
-}
-
-template <typename T>
-future<std::vector<future<T>>> when_all(std::vector<future<T>> futures)
-{
-  return when<all>(std::move(futures));
-}
-
-template <typename T>
-future<std::vector<future<T>>> when_any(std::vector<future<T>> futures)
-{
-  return when<any>(std::move(futures));
 }
 
 template <typename T>
@@ -562,8 +557,9 @@ auto future<T>::then(F&&       func,
 
   promise<R> value;
   auto       rv = value.get_future();
-  this->state->then(
-    [&exec, t = *this, value = std::move(value), func = std::forward<F>(func)]() mutable {
+  auto& state = *this->state;
+  state.then(
+    [&exec, t = std::move(*this), value = std::move(value), func = std::forward<F>(func)]() mutable {
       exec.queue([t = std::move(t), value = std::move(value), func = std::move(func)]() mutable {
         try
         {
