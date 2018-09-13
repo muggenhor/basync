@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace basync {
@@ -236,21 +237,12 @@ template <typename T>
 class shared_state
 {
 public:
-  shared_state()
-    : storage(NULL)
-  {
-  }
-  ~shared_state()
-  {
-    delete storage;
-  }
   void set(T&& value)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
+    if (!std::holds_alternative<std::monostate>(storage))
       throw promise_already_satisfied();
-    storage   = new T(std::move(value));
-    value_set = true;
+    storage = std::move(value);
     cv.notify_all();
     for (auto& cb : cbs)
       cb();
@@ -259,10 +251,9 @@ public:
   void set(const T& value)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
+    if (!std::holds_alternative<std::monostate>(storage))
       throw promise_already_satisfied();
-    storage   = new T(value);
-    value_set = true;
+    storage = value;
     cv.notify_all();
     for (auto& cb : cbs)
       cb();
@@ -271,10 +262,9 @@ public:
   void set_error(std::exception_ptr eptr)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
+    if (!std::holds_alternative<std::monostate>(storage))
       throw promise_already_satisfied();
-    this->eptr = eptr;
-    value_set  = true;
+    storage = eptr;
     cv.notify_all();
     for (auto& cb : cbs)
       cb();
@@ -283,25 +273,28 @@ public:
   T get()
   {
     std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [this] { return value_set; });
-    if (eptr)
-      std::rethrow_exception(eptr);
-    return *storage;
+    cv.wait(lk, [this] { return !std::holds_alternative<std::monostate>(storage); });
+    if (auto eptr = std::get_if<std::exception_ptr>(&storage); eptr != nullptr)
+      std::rethrow_exception(*eptr);
+    return std::get<T>(storage);
   }
   void then(unique_function<void()> cb)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
-      cb();
-    else
-      cbs.push_back(std::move(cb));
+    visit(
+      [&cb, this](auto&& arg) {
+        using U = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<U, std::monostate>)
+          cbs.push_back(std::move(cb));
+        else
+          cb();
+      },
+      storage);
   }
-  std::vector<unique_function<void()>> cbs;
-  T*                                   storage;
-  std::exception_ptr                   eptr;
-  mutable std::mutex                   m;
-  mutable std::condition_variable      cv;
-  bool                                 value_set = false;
+  std::vector<unique_function<void()>>                cbs;
+  std::variant<std::monostate, T, std::exception_ptr> storage;
+  mutable std::mutex                                  m;
+  mutable std::condition_variable                     cv;
 };
 
 template <>
@@ -311,9 +304,9 @@ public:
   void set()
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
+    if (!std::holds_alternative<std::monostate>(storage))
       throw promise_already_satisfied();
-    value_set = true;
+    storage.emplace<void_t>();
     cv.notify_all();
     for (auto& cb : cbs)
       cb();
@@ -322,10 +315,9 @@ public:
   void set_error(std::exception_ptr eptr)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
+    if (!std::holds_alternative<std::monostate>(storage))
       throw promise_already_satisfied();
-    this->eptr = eptr;
-    value_set  = true;
+    storage = eptr;
     cv.notify_all();
     for (auto& cb : cbs)
       cb();
@@ -334,23 +326,31 @@ public:
   void get() const
   {
     std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [this] { return value_set; });
-    if (eptr)
-      std::rethrow_exception(eptr);
+    cv.wait(lk, [this] { return !std::holds_alternative<std::monostate>(storage); });
+    if (auto eptr = std::get_if<std::exception_ptr>(&storage); eptr != nullptr)
+      std::rethrow_exception(*eptr);
+    return static_cast<void>(std::get<void_t>(storage));
   }
   void then(unique_function<void()> cb)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (value_set)
-      cb();
-    else
-      cbs.push_back(std::move(cb));
+    visit(
+      [&cb, this](auto&& arg) {
+        using U = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<U, std::monostate>)
+          cbs.push_back(std::move(cb));
+        else
+          cb();
+      },
+      storage);
   }
-  std::vector<unique_function<void()>> cbs;
-  std::exception_ptr                   eptr;
-  mutable std::mutex                   m;
-  mutable std::condition_variable      cv;
-  bool                                 value_set = false;
+  // clang-format off
+  struct void_t {};
+  // clang-format on
+  std::vector<unique_function<void()>>                     cbs;
+  std::variant<std::monostate, void_t, std::exception_ptr> storage;
+  mutable std::mutex                                       m;
+  mutable std::condition_variable                          cv;
 };
 
 template <typename T>
@@ -373,7 +373,7 @@ T future<T>::get() const
 template <typename T>
 bool future<T>::is_ready() const
 {
-  return state->value_set;
+  return !std::holds_alternative<std::monostate>(state->storage);
 }
 
 template <typename T>
