@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <condition_variable>
 #include <exception>
 #include <functional>
@@ -226,9 +227,9 @@ public:
   std::shared_ptr<shared_state<T>> state;
 };
 
-// TODO: missing broken_promise here
 // clang-format off
 struct promise_exception : std::exception {};
+struct broken_promise : std::exception {};
 struct promise_already_satisfied : promise_exception {};
 struct no_future_state : promise_exception {};
 // clang-format on
@@ -240,8 +241,9 @@ public:
   void set(T&& value)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (!std::holds_alternative<std::monostate>(storage))
+    if (std::exchange(satisfied, true))
       throw promise_already_satisfied();
+    assert(std::holds_alternative<std::monostate>(storage));
     storage = std::move(value);
     cv.notify_all();
     if (auto cb = std::move(this->cb); cb)
@@ -250,8 +252,9 @@ public:
   void set(const T& value)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (!std::holds_alternative<std::monostate>(storage))
+    if (std::exchange(satisfied, true))
       throw promise_already_satisfied();
+    assert(std::holds_alternative<std::monostate>(storage));
     storage = value;
     cv.notify_all();
     if (auto cb = std::move(this->cb); cb)
@@ -260,8 +263,9 @@ public:
   void set_error(std::exception_ptr eptr)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (!std::holds_alternative<std::monostate>(storage))
+    if (std::exchange(satisfied, true))
       throw promise_already_satisfied();
+    assert(std::holds_alternative<std::monostate>(storage));
     storage = eptr;
     cv.notify_all();
     if (auto cb = std::move(this->cb); cb)
@@ -296,6 +300,7 @@ public:
   unique_function<void()>                             cb;
   std::variant<std::monostate, T, std::exception_ptr> storage;
   bool                                                retrieved = false;
+  bool                                                satisfied = false;
   mutable std::mutex                                  m;
   mutable std::condition_variable                     cv;
 };
@@ -307,8 +312,9 @@ public:
   void set()
   {
     std::unique_lock<std::mutex> lk(m);
-    if (!std::holds_alternative<std::monostate>(storage))
+    if (std::exchange(satisfied, true))
       throw promise_already_satisfied();
+    assert(std::holds_alternative<std::monostate>(storage));
     storage.emplace<void_t>();
     cv.notify_all();
     if (auto cb = std::move(this->cb); cb)
@@ -317,8 +323,9 @@ public:
   void set_error(std::exception_ptr eptr)
   {
     std::unique_lock<std::mutex> lk(m);
-    if (!std::holds_alternative<std::monostate>(storage))
+    if (std::exchange(satisfied, true))
       throw promise_already_satisfied();
+    assert(std::holds_alternative<std::monostate>(storage));
     storage = eptr;
     cv.notify_all();
     if (auto cb = std::move(this->cb); cb)
@@ -356,6 +363,7 @@ public:
   unique_function<void()>                                  cb;
   std::variant<std::monostate, void_t, std::exception_ptr> storage;
   bool                                                     retrieved = false;
+  bool                                                     satisfied = false;
   mutable std::mutex                                       m;
   mutable std::condition_variable                          cv;
 };
@@ -412,6 +420,16 @@ public:
   {
     state->set_error(std::move(eptr));
   }
+  promise()          = default;
+  promise(promise&&) = default;
+  promise& operator=(promise&&) = default;
+  ~promise()
+  {
+    if (state && !state->satisfied)
+      state->set_error(std::make_exception_ptr(broken_promise()));
+  }
+
+private:
   std::shared_ptr<shared_state<T>> state = std::make_shared<shared_state<T>>();
 };
 
@@ -431,6 +449,16 @@ public:
   {
     state->set_error(std::move(eptr));
   }
+  promise()          = default;
+  promise(promise&&) = default;
+  promise& operator=(promise&&) = default;
+  ~promise()
+  {
+    if (state && !state->satisfied)
+      state->set_error(std::make_exception_ptr(broken_promise()));
+  }
+
+private:
   std::shared_ptr<shared_state<void>> state = std::make_shared<shared_state<void>>();
 };
 
