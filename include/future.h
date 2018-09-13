@@ -210,11 +210,14 @@ executor& default_executor();
 template <typename F>
 auto async(F&& func, executor& exec = default_executor()) -> future<decltype(func())>;
 
-// TODO: make this (functionally) unique_future
 template <typename T>
 class future
 {
 public:
+  future()         = default;
+  future(future&&) = default;
+  future& operator=(future&&) = default;
+
   T    get() &&;
   bool is_ready() const;
   template <typename F>
@@ -556,29 +559,31 @@ auto future<T>::then(F&&       func,
   using R = decltype(func(std::declval<future<T>>()));
 
   promise<R> value;
-  auto       rv = value.get_future();
-  auto& state = *this->state;
-  state.then(
-    [&exec, t = std::move(*this), value = std::move(value), func = std::forward<F>(func)]() mutable {
-      exec.queue([t = std::move(t), value = std::move(value), func = std::move(func)]() mutable {
-        try
+  auto       rv    = value.get_future();
+  auto&      state = *this->state;
+  state.then([&exec,
+              t     = std::move(*this),
+              value = std::move(value),
+              func  = std::forward<F>(func)]() mutable {
+    exec.queue([t = std::move(t), value = std::move(value), func = std::move(func)]() mutable {
+      try
+      {
+        if constexpr (std::is_void_v<R>)
         {
-          if constexpr (std::is_void_v<R>)
-          {
-            func(std::move(t));
-            value.set_value();
-          }
-          else
-          {
-            value.set_value(func(std::move(t)));
-          }
+          func(std::move(t));
+          value.set_value();
         }
-        catch (...)
+        else
         {
-          value.set_error(std::current_exception());
+          value.set_value(func(std::move(t)));
         }
-      });
+      }
+      catch (...)
+      {
+        value.set_error(std::current_exception());
+      }
     });
+  });
   return rv;
 }
 
