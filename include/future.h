@@ -497,6 +497,18 @@ future<std::vector<future<T>>> when(std::vector<future<T>> futures)
 }
 
 template <typename T>
+future<std::vector<future<T>>> when_all(std::vector<future<T>> futures)
+{
+  return when<all>(std::move(futures));
+}
+
+template <typename T>
+future<std::vector<future<T>>> when_any(std::vector<future<T>> futures)
+{
+  return when<any>(std::move(futures));
+}
+
+template <typename T>
 template <typename F>
 auto future<T>::then(F&&       func,
                      executor& exec) && -> future<decltype(func(std::declval<future<T>>()))>
