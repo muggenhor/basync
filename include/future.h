@@ -214,11 +214,12 @@ template <typename T>
 class future
 {
 public:
-  T    get() const;
+  T    get() &&;
   bool is_ready() const;
   template <typename F>
-  auto then(F&& func, executor& exec = default_executor())
-    -> future<decltype(func(std::declval<future<T>>()))>;
+  auto
+  then(F&&       func,
+       executor& exec = default_executor()) && -> future<decltype(func(std::declval<future<T>>()))>;
 //private:
   future(std::shared_ptr<shared_state<T>> state);
   friend class promise<T>;
@@ -226,13 +227,11 @@ public:
 };
 
 // TODO: missing broken_promise here
-struct promise_exception : public std::exception
-{
-};
-
-struct promise_already_satisfied : promise_exception
-{
-};
+// clang-format off
+struct promise_exception : std::exception {};
+struct promise_already_satisfied : promise_exception {};
+struct no_future_state : promise_exception {};
+// clang-format on
 
 template <typename T>
 class shared_state
@@ -245,9 +244,8 @@ public:
       throw promise_already_satisfied();
     storage = std::move(value);
     cv.notify_all();
-    for (auto& cb : cbs)
+    if (auto cb = std::move(this->cb); cb)
       cb();
-    cbs.clear();
   }
   void set(const T& value)
   {
@@ -256,9 +254,8 @@ public:
       throw promise_already_satisfied();
     storage = value;
     cv.notify_all();
-    for (auto& cb : cbs)
+    if (auto cb = std::move(this->cb); cb)
       cb();
-    cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
   {
@@ -267,34 +264,38 @@ public:
       throw promise_already_satisfied();
     storage = eptr;
     cv.notify_all();
-    for (auto& cb : cbs)
+    if (auto cb = std::move(this->cb); cb)
       cb();
-    cbs.clear();
   }
-  T get()
+  T get() &&
   {
     std::unique_lock<std::mutex> lk(m);
     cv.wait(lk, [this] { return !std::holds_alternative<std::monostate>(storage); });
+    if (std::exchange(retrieved, true))
+      throw no_future_state();
     if (auto eptr = std::get_if<std::exception_ptr>(&storage); eptr != nullptr)
       std::rethrow_exception(*eptr);
-    return std::get<T>(storage);
+    return std::move(std::get<T>(storage));
   }
   template <typename F, typename = decltype(std::declval<F>()())>
   void then(F&& cb)
   {
     std::unique_lock<std::mutex> lk(m);
+    if (retrieved || this->cb)
+      throw no_future_state();
     visit(
       [&cb, this](auto&& arg) {
         using U = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<U, std::monostate>)
-          cbs.emplace_back(std::forward<F>(cb));
+          this->cb = std::forward<F>(cb);
         else
           cb();
       },
       storage);
   }
-  std::vector<unique_function<void()>>                cbs;
+  unique_function<void()>                             cb;
   std::variant<std::monostate, T, std::exception_ptr> storage;
+  bool                                                retrieved = false;
   mutable std::mutex                                  m;
   mutable std::condition_variable                     cv;
 };
@@ -310,9 +311,8 @@ public:
       throw promise_already_satisfied();
     storage.emplace<void_t>();
     cv.notify_all();
-    for (auto& cb : cbs)
+    if (auto cb = std::move(this->cb); cb)
       cb();
-    cbs.clear();
   }
   void set_error(std::exception_ptr eptr)
   {
@@ -321,27 +321,30 @@ public:
       throw promise_already_satisfied();
     storage = eptr;
     cv.notify_all();
-    for (auto& cb : cbs)
+    if (auto cb = std::move(this->cb); cb)
       cb();
-    cbs.clear();
   }
-  void get() const
+  void get() &&
   {
     std::unique_lock<std::mutex> lk(m);
     cv.wait(lk, [this] { return !std::holds_alternative<std::monostate>(storage); });
+    if (std::exchange(retrieved, true))
+      throw no_future_state();
     if (auto eptr = std::get_if<std::exception_ptr>(&storage); eptr != nullptr)
       std::rethrow_exception(*eptr);
-    return static_cast<void>(std::get<void_t>(storage));
+    return static_cast<void>(std::move(std::get<void_t>(storage)));
   }
   template <typename F, typename = decltype(std::declval<F>()())>
   void then(F&& cb)
   {
     std::unique_lock<std::mutex> lk(m);
+    if (retrieved || this->cb)
+      throw no_future_state();
     visit(
       [&cb, this](auto&& arg) {
         using U = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<U, std::monostate>)
-          cbs.emplace_back(std::forward<F>(cb));
+          this->cb = std::forward<F>(cb);
         else
           cb();
       },
@@ -350,8 +353,9 @@ public:
   // clang-format off
   struct void_t {};
   // clang-format on
-  std::vector<unique_function<void()>>                     cbs;
+  unique_function<void()>                                  cb;
   std::variant<std::monostate, void_t, std::exception_ptr> storage;
+  bool                                                     retrieved = false;
   mutable std::mutex                                       m;
   mutable std::condition_variable                          cv;
 };
@@ -368,9 +372,9 @@ template <typename T>
 class promise;
 
 template <typename T>
-T future<T>::get() const
+T future<T>::get() &&
 {
-  return state->get();
+  return std::move(*state).get();
 }
 
 template <typename T>
@@ -487,7 +491,7 @@ future<std::vector<future<T>>> when(std::vector<future<T>> futures)
   inst->updatePromise();
   for (auto& f : inst->futures)
   {
-    f.then([inst = std::move(inst)](const future<T>&) { inst->updatePromise(); });
+    std::move(f).then([inst = std::move(inst)](const future<T>&) { inst->updatePromise(); });
   }
   return rv;
 }
@@ -547,7 +551,8 @@ struct then_impl<T, void>
 
 template <typename T>
 template <typename F>
-auto future<T>::then(F&& func, executor& exec) -> future<decltype(func(std::declval<future<T>>()))>
+auto future<T>::then(F&&       func,
+                     executor& exec) && -> future<decltype(func(std::declval<future<T>>()))>
 {
   return detail::then_impl<T, decltype(func(std::declval<future<T>>()))>::impl(
     *this, std::forward<F>(func), exec);
