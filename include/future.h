@@ -75,11 +75,12 @@ public:
   {
   }
 
-  unique_function operator=(unique_function&& rhs) noexcept
+  unique_function& operator=(unique_function&& rhs) noexcept
   {
     if (f)
       f->destroy();
     f = std::exchange(rhs.f, nullptr);
+    return *this;
   }
 
   R operator()(Args... args) const
