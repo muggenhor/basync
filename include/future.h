@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -192,8 +193,6 @@ template <
 unique_function(F) -> unique_function<Signature>;
 
 template <typename T>
-class shared_state;
-template <typename T>
 class promise;
 template <typename T>
 class future;
@@ -210,34 +209,6 @@ executor& default_executor();
 template <typename F>
 auto async(F&& func, executor& exec = default_executor()) -> future<decltype(func())>;
 
-namespace detail {
-template <typename T>
-struct future_factory;
-}
-
-template <typename T>
-class future
-{
-public:
-  future()         = default;
-  future(future&&) = default;
-  future& operator=(future&&) = default;
-
-  T    get() &&;
-  bool is_ready() const;
-  template <typename F>
-  auto
-  then(F&&       func,
-       executor& exec = default_executor()) && -> future<decltype(func(std::declval<future<T>>()))>;
-
-private:
-  future(std::shared_ptr<shared_state<T>> state);
-  friend class promise<T>;
-  friend struct detail::future_factory<T>;
-
-  std::shared_ptr<shared_state<T>> state;
-};
-
 // clang-format off
 struct promise_exception : std::exception {};
 struct broken_promise : std::exception {};
@@ -247,43 +218,118 @@ struct future_not_retrieved : promise_exception {};
 struct future_already_retrieved : promise_exception {};
 // clang-format on
 
+namespace detail {
 template <typename T>
-class shared_state
+struct future_factory;
+}
+
+template <typename T>
+class future
 {
+  // clang-format off
+  struct void_t {};
+  // clang-format on
+  using storage_t = std::conditional_t<std::is_void_v<T>, void_t, T>;
+
 public:
-  void set(T&& value)
+  future() = default;
+  future(future&& rhs) noexcept(std::is_nothrow_move_constructible_v<storage_t>)
   {
-    std::unique_lock<std::mutex> lk(m);
-    if (std::exchange(satisfied, true))
-      throw promise_already_satisfied();
-    assert(std::holds_alternative<std::monostate>(storage));
-    storage = std::move(value);
-    cv.notify_all();
-    if (auto cb = std::move(this->cb); cb)
-      cb();
+    while (true)
+    {
+      std::unique_lock lf(rhs.m);
+      if (rhs.p)
+      {
+        std::unique_lock lp(rhs.p->m, std::try_to_lock);
+        if (!lp)
+        {
+          // TODO: figure out if this attempt at avoiding dead lock risks live lock instead
+          std::this_thread::yield();
+          continue;
+        }
+
+        p = std::exchange(rhs.p, nullptr);
+        assert(p->f == &rhs);
+        p->f = this;
+      }
+
+      continuation = std::move(rhs.continuation);
+      storage      = std::exchange(rhs.storage, {});
+      retrieved    = std::exchange(rhs.retrieved, false);
+      break;
+    }
   }
-  void set(const T& value)
+
+  future& operator=(future&& rhs) noexcept(std::is_nothrow_move_constructible_v<storage_t>)
   {
-    std::unique_lock<std::mutex> lk(m);
-    if (std::exchange(satisfied, true))
-      throw promise_already_satisfied();
-    assert(std::holds_alternative<std::monostate>(storage));
-    storage = value;
-    cv.notify_all();
-    if (auto cb = std::move(this->cb); cb)
-      cb();
+    while (true)
+    {
+      std::unique_lock lf(m);
+      if (p)
+      {
+        std::unique_lock lp(p->m, std::try_to_lock);
+        if (!lp)
+        {
+          // TODO: figure out if this attempt at avoiding dead lock risks live lock instead
+          std::this_thread::yield();
+          continue;
+        }
+
+        p->f = nullptr;
+        p    = nullptr;
+      }
+      break;
+    }
+
+    while (true)
+    {
+      std::unique_lock lf(rhs.m);
+      if (rhs.p)
+      {
+        std::unique_lock lp(rhs.p->m, std::try_to_lock);
+        if (!lp)
+        {
+          // TODO: figure out if this attempt at avoiding dead lock risks live lock instead
+          std::this_thread::yield();
+          continue;
+        }
+
+        p = std::exchange(rhs.p, nullptr);
+        assert(p->f == &rhs);
+        p->f = this;
+      }
+
+      continuation = std::move(rhs.continuation);
+      storage      = std::exchange(rhs.storage, {});
+      retrieved    = std::exchange(rhs.retrieved, false);
+      break;
+    }
+
+    return *this;
   }
-  void set_error(std::exception_ptr eptr)
+
+  ~future()
   {
-    std::unique_lock<std::mutex> lk(m);
-    if (std::exchange(satisfied, true))
-      throw promise_already_satisfied();
-    assert(std::holds_alternative<std::monostate>(storage));
-    storage = eptr;
-    cv.notify_all();
-    if (auto cb = std::move(this->cb); cb)
-      cb();
+    while (true)
+    {
+      std::unique_lock lf(m);
+      if (p)
+      {
+        std::unique_lock lp(p->m, std::try_to_lock);
+        if (!lp)
+        {
+          // TODO: figure out if this attempt at avoiding dead lock risks live lock instead
+          std::this_thread::yield();
+          continue;
+        }
+
+        p->f = nullptr;
+        p    = nullptr;
+      }
+      break;
+    }
   }
+
   T get() &&
   {
     std::unique_lock<std::mutex> lk(m);
@@ -292,93 +338,33 @@ public:
       throw no_future_state();
     if (auto eptr = std::get_if<std::exception_ptr>(&storage); eptr != nullptr)
       std::rethrow_exception(*eptr);
-    return std::move(std::get<T>(storage));
+    if constexpr (std::is_void_v<T>)
+      std::get<future<T>::void_t>(storage);
+    else
+      return std::move(std::get<T>(storage));
   }
-  template <typename F, typename = decltype(std::declval<F>()())>
-  void then(F&& cb)
-  {
-    std::unique_lock<std::mutex> lk(m);
-    if (retrieved || this->cb)
-      throw no_future_state();
-    visit(
-      [&cb, this](auto&& arg) {
-        using U = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<U, std::monostate>)
-          this->cb = std::forward<F>(cb);
-        else
-          cb();
-      },
-      storage);
-  }
-  unique_function<void()>                             cb;
-  std::variant<std::monostate, T, std::exception_ptr> storage;
-  bool                                                retrieved = false;
-  bool                                                satisfied = false;
-  mutable std::mutex                                  m;
-  mutable std::condition_variable                     cv;
-};
 
-template <>
-struct shared_state<void>
-{
-public:
-  void set()
+  bool is_ready() const
   {
     std::unique_lock<std::mutex> lk(m);
-    if (std::exchange(satisfied, true))
-      throw promise_already_satisfied();
-    assert(std::holds_alternative<std::monostate>(storage));
-    storage.emplace<void_t>();
-    cv.notify_all();
-    if (auto cb = std::move(this->cb); cb)
-      cb();
+    return !std::holds_alternative<std::monostate>(storage);
   }
-  void set_error(std::exception_ptr eptr)
-  {
-    std::unique_lock<std::mutex> lk(m);
-    if (std::exchange(satisfied, true))
-      throw promise_already_satisfied();
-    assert(std::holds_alternative<std::monostate>(storage));
-    storage = eptr;
-    cv.notify_all();
-    if (auto cb = std::move(this->cb); cb)
-      cb();
-  }
-  void get() &&
-  {
-    std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [this] { return !std::holds_alternative<std::monostate>(storage); });
-    if (std::exchange(retrieved, true))
-      throw no_future_state();
-    if (auto eptr = std::get_if<std::exception_ptr>(&storage); eptr != nullptr)
-      std::rethrow_exception(*eptr);
-    return static_cast<void>(std::move(std::get<void_t>(storage)));
-  }
-  template <typename F, typename = decltype(std::declval<F>()())>
-  void then(F&& cb)
-  {
-    std::unique_lock<std::mutex> lk(m);
-    if (retrieved || this->cb)
-      throw no_future_state();
-    visit(
-      [&cb, this](auto&& arg) {
-        using U = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<U, std::monostate>)
-          this->cb = std::forward<F>(cb);
-        else
-          cb();
-      },
-      storage);
-  }
-  // clang-format off
-  struct void_t {};
-  // clang-format on
-  unique_function<void()>                                  cb;
-  std::variant<std::monostate, void_t, std::exception_ptr> storage;
-  bool                                                     retrieved = false;
-  bool                                                     satisfied = false;
-  mutable std::mutex                                       m;
-  mutable std::condition_variable                          cv;
+
+  template <typename F>
+  auto
+  then(F&&       func,
+       executor& exec = default_executor()) && -> future<decltype(func(std::declval<future<T>>()))>;
+
+private:
+  friend class promise<T>;
+  friend struct detail::future_factory<T>;
+
+  unique_function<void(future<T>&&)>                          continuation;
+  std::variant<std::monostate, storage_t, std::exception_ptr> storage;
+  bool                                                        retrieved = false;
+  mutable std::mutex                                          m;
+  mutable std::condition_variable                             cv;
+  promise<T>*                                                 p = nullptr;
 };
 
 namespace detail {
@@ -387,9 +373,16 @@ struct future_factory
 {
   static future<T> make_ready(T value)
   {
-    auto state = std::make_shared<shared_state<T>>();
-    state->set(std::forward<T>(value));
-    return future<T>(std::move(state));
+    future<T> f;
+    f.storage = std::forward<T>(value);
+    return f;
+  }
+
+  static future<T> make_exceptional(std::exception_ptr eptr)
+  {
+    future<T> f;
+    f.storage = std::move(eptr);
+    return f;
   }
 };
 
@@ -398,9 +391,16 @@ struct future_factory<void>
 {
   static future<void> make_ready()
   {
-    auto state = std::make_shared<shared_state<void>>();
-    state->set();
-    return future<void>(std::move(state));
+    future<void> f;
+    f.storage.emplace<future<void>::void_t>();
+    return f;
+  }
+
+  static future<void> make_exceptional(std::exception_ptr eptr)
+  {
+    future<void> f;
+    f.storage = std::move(eptr);
+    return f;
   }
 };
 }
@@ -417,68 +417,177 @@ inline future<void> make_ready_future()
 }
 
 template <typename T>
-class promise;
-
-template <typename T>
-T future<T>::get() &&
+future<T> make_exceptional_future(std::exception_ptr eptr)
 {
-  return std::move(*state).get();
-}
-
-template <typename T>
-bool future<T>::is_ready() const
-{
-  return !std::holds_alternative<std::monostate>(state->storage);
-}
-
-template <typename T>
-future<T>::future(std::shared_ptr<shared_state<T>> state)
-  : state(std::move(state))
-{
+  return detail::future_factory<T>::make_exceptional(std::move(eptr));
 }
 
 template <typename T>
 class promise
 {
 public:
-  // TODO:
-  //   * store shared state by value inside the future
   future<T> get_future()
   {
     if (std::exchange(retrieved, true))
       throw future_already_retrieved();
-    return future<T>(state);
+    future<T> f;
+    f.p     = this;
+    this->f = &f;
+    return f;
   }
+
   void set_value(T&& value)
   {
     if (!retrieved)
       throw future_not_retrieved();
-    state->set(std::forward<T>(value));
+    if (std::exchange(satisfied, true))
+      throw promise_already_satisfied();
+
+    std::unique_lock lp(m);
+    if (f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p = nullptr;
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation([&value] {
+          future<T> f;
+          f.storage = std::move(value);
+          return f;
+        }());
+      }
+      else
+      {
+        f->storage = std::move(value);
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
   }
+
   void set_value(const T& value)
   {
     if (!retrieved)
       throw future_not_retrieved();
-    state->set(value);
+    if (std::exchange(satisfied, true))
+      throw promise_already_satisfied();
+
+    std::unique_lock lp(m);
+    if (f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p = nullptr;
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation([&value] {
+          future<T> f;
+          f.storage = value;
+          return f;
+        }());
+      }
+      else
+      {
+        f->storage = value;
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
   }
+
   void set_error(std::exception_ptr eptr)
   {
     if (!retrieved)
       throw future_not_retrieved();
-    state->set_error(std::move(eptr));
+    if (std::exchange(satisfied, true))
+      throw promise_already_satisfied();
+
+    std::unique_lock lp(m);
+    if (f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p = nullptr;
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation(make_exceptional_future<T>(std::move(eptr)));
+      }
+      else
+      {
+        f->storage = std::move(eptr);
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
   }
-  promise()          = default;
-  promise(promise&&) = default;
-  promise& operator=(promise&&) = default;
+
+  promise() = default;
+  promise(promise&& rhs) noexcept
+    : retrieved(std::exchange(rhs.retrieved, false))
+    , satisfied(std::exchange(rhs.satisfied, false))
+  {
+    std::unique_lock lt(m);
+    std::unique_lock lp(rhs.m);
+    if (rhs.f)
+    {
+      std::unique_lock lf(rhs.f->m);
+      f = std::exchange(rhs.f, nullptr);
+      assert(f->p == &rhs);
+      f->p = this;
+    }
+  }
+
+  promise& operator=(promise&& rhs) noexcept
+  {
+    std::unique_lock lt(m);
+    std::unique_lock lp(rhs.m);
+    if (rhs.f)
+    {
+      std::unique_lock lf(rhs.f->m);
+      f = std::exchange(rhs.f, nullptr);
+      assert(f->p == &rhs);
+      f->p = this;
+    }
+    retrieved = std::exchange(rhs.retrieved, false);
+    satisfied = std::exchange(rhs.satisfied, false);
+    return *this;
+  }
+
   ~promise()
   {
-    if (state && !state->satisfied)
-      state->set_error(std::make_exception_ptr(broken_promise()));
+    std::unique_lock lp(m);
+    if (!satisfied && f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p      = nullptr;
+      auto eptr = std::make_exception_ptr(broken_promise());
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation(make_exceptional_future<T>(std::move(eptr)));
+      }
+      else
+      {
+        f->storage = std::move(eptr);
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
+    assert(satisfied || !f);
   }
 
 private:
-  std::shared_ptr<shared_state<T>> state     = std::make_shared<shared_state<T>>();
-  bool                             retrieved = false;
+  friend class future<T>;
+
+  future<T>* f         = nullptr;
+  bool       retrieved = false;
+  bool       satisfied = false;
+  std::mutex m;
 };
 
 template <>
@@ -489,32 +598,132 @@ public:
   {
     if (std::exchange(retrieved, true))
       throw future_already_retrieved();
-    return future<void>(state);
+    future<void> f;
+    f.p     = this;
+    this->f = &f;
+    return f;
   }
+
   void set_value()
   {
     if (!retrieved)
       throw future_not_retrieved();
-    state->set();
+    if (std::exchange(satisfied, true))
+      throw promise_already_satisfied();
+
+    std::unique_lock lp(m);
+    if (f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p = nullptr;
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation([] {
+          future<void> f;
+          f.storage.emplace<future<void>::void_t>();
+          return f;
+        }());
+      }
+      else
+      {
+        f->storage.emplace<future<void>::void_t>();
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
   }
+
   void set_error(std::exception_ptr eptr)
   {
     if (!retrieved)
       throw future_not_retrieved();
-    state->set_error(std::move(eptr));
+    if (std::exchange(satisfied, true))
+      throw promise_already_satisfied();
+
+    std::unique_lock lp(m);
+    if (f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p = nullptr;
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation(make_exceptional_future<void>(std::move(eptr)));
+      }
+      else
+      {
+        f->storage = std::move(eptr);
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
   }
-  promise()          = default;
-  promise(promise&&) = default;
-  promise& operator=(promise&&) = default;
+
+  promise() = default;
+  promise(promise&& rhs) noexcept
+    : retrieved(std::exchange(rhs.retrieved, false))
+    , satisfied(std::exchange(rhs.satisfied, false))
+  {
+    std::unique_lock lt(m);
+    std::unique_lock lp(rhs.m);
+    if (rhs.f)
+    {
+      std::unique_lock lf(rhs.f->m);
+      f = std::exchange(rhs.f, nullptr);
+      assert(f->p == &rhs);
+      f->p = this;
+    }
+  }
+
+  promise& operator=(promise&& rhs) noexcept
+  {
+    std::unique_lock lt(m);
+    std::unique_lock lp(rhs.m);
+    if (rhs.f)
+    {
+      std::unique_lock lf(rhs.f->m);
+      f = std::exchange(rhs.f, nullptr);
+      assert(f->p == &rhs);
+      f->p = this;
+    }
+    retrieved = std::exchange(rhs.retrieved, false);
+    satisfied = std::exchange(rhs.satisfied, false);
+    return *this;
+  }
+
   ~promise()
   {
-    if (state && !state->satisfied)
-      state->set_error(std::make_exception_ptr(broken_promise()));
+    std::unique_lock lp(m);
+    if (!satisfied && f)
+    {
+      std::unique_lock lf(f->m);
+      assert(std::holds_alternative<std::monostate>(f->storage));
+      f->p      = nullptr;
+      auto eptr = std::make_exception_ptr(broken_promise());
+      if (auto continuation = std::move(f->continuation); continuation)
+      {
+        f->retrieved = true;
+        continuation(make_exceptional_future<void>(std::move(eptr)));
+      }
+      else
+      {
+        f->storage = std::move(eptr);
+        f->cv.notify_all();
+      }
+      f = nullptr;
+    }
+    assert(satisfied || !f);
   }
 
 private:
-  std::shared_ptr<shared_state<void>> state     = std::make_shared<shared_state<void>>();
-  bool                                retrieved = false;
+  friend class future<void>;
+  future<void>* f         = nullptr;
+  bool          retrieved = false;
+  bool          satisfied = false;
+  std::mutex    m;
 };
 
 template <typename T>
@@ -594,31 +803,39 @@ auto future<T>::then(F&&       func,
   using R = decltype(func(std::declval<future<T>>()));
 
   promise<R> value;
-  auto       rv    = value.get_future();
-  auto&      state = *this->state;
-  state.then([&exec,
-              t     = std::move(*this),
-              value = std::move(value),
-              func  = std::forward<F>(func)]() mutable {
-    exec.queue([t = std::move(t), value = std::move(value), func = std::move(func)]() mutable {
-      try
-      {
-        if constexpr (std::is_void_v<R>)
+  auto       rv = value.get_future();
+
+  std::unique_lock lk(m);
+  if (retrieved || continuation)
+    throw no_future_state();
+
+  continuation =
+    [&exec, value = std::move(value), func = std::forward<F>(func)](future<T>&& f) mutable {
+      exec.queue([f = std::move(f), value = std::move(value), func = std::move(func)]() mutable {
+        try
         {
-          func(std::move(t));
-          value.set_value();
+          if constexpr (std::is_void_v<R>)
+          {
+            std::forward<F>(func)(std::move(f));
+            value.set_value();
+          }
+          else
+          {
+            value.set_value(std::forward<F>(func)(std::move(f)));
+          }
         }
-        else
+        catch (...)
         {
-          value.set_value(func(std::move(t)));
+          value.set_error(std::current_exception());
         }
-      }
-      catch (...)
-      {
-        value.set_error(std::current_exception());
-      }
-    });
-  });
+      });
+    };
+
+  if (!std::holds_alternative<std::monostate>(storage))
+  {
+    lk.unlock();
+    continuation(std::move(*this));
+  }
   return rv;
 }
 
