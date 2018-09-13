@@ -232,6 +232,8 @@ struct promise_exception : std::exception {};
 struct broken_promise : std::exception {};
 struct promise_already_satisfied : promise_exception {};
 struct no_future_state : promise_exception {};
+struct future_not_retrieved : promise_exception {};
+struct future_already_retrieved : promise_exception {};
 // clang-format on
 
 template <typename T>
@@ -403,21 +405,28 @@ class promise
 public:
   // TODO:
   //   * store shared state by value inside the future
-  //   * make having called get_future() a precondition for the set_XXX functions
   future<T> get_future()
   {
+    if (std::exchange(retrieved, true))
+      throw future_already_retrieved();
     return future<T>(state);
   }
   void set_value(T&& value)
   {
+    if (!retrieved)
+      throw future_not_retrieved();
     state->set(std::forward<T>(value));
   }
   void set_value(const T& value)
   {
+    if (!retrieved)
+      throw future_not_retrieved();
     state->set(value);
   }
   void set_error(std::exception_ptr eptr)
   {
+    if (!retrieved)
+      throw future_not_retrieved();
     state->set_error(std::move(eptr));
   }
   promise()          = default;
@@ -430,7 +439,8 @@ public:
   }
 
 private:
-  std::shared_ptr<shared_state<T>> state = std::make_shared<shared_state<T>>();
+  std::shared_ptr<shared_state<T>> state     = std::make_shared<shared_state<T>>();
+  bool                             retrieved = false;
 };
 
 template <>
@@ -439,14 +449,20 @@ class promise<void>
 public:
   future<void> get_future()
   {
+    if (std::exchange(retrieved, true))
+      throw future_already_retrieved();
     return future<void>(state);
   }
   void set_value()
   {
+    if (!retrieved)
+      throw future_not_retrieved();
     state->set();
   }
   void set_error(std::exception_ptr eptr)
   {
+    if (!retrieved)
+      throw future_not_retrieved();
     state->set_error(std::move(eptr));
   }
   promise()          = default;
@@ -459,7 +475,8 @@ public:
   }
 
 private:
-  std::shared_ptr<shared_state<void>> state = std::make_shared<shared_state<void>>();
+  std::shared_ptr<shared_state<void>> state     = std::make_shared<shared_state<void>>();
+  bool                                retrieved = false;
 };
 
 template <typename T>
