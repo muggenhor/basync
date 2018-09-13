@@ -278,14 +278,15 @@ public:
       std::rethrow_exception(*eptr);
     return std::get<T>(storage);
   }
-  void then(unique_function<void()> cb)
+  template <typename F, typename = decltype(std::declval<F>()())>
+  void then(F&& cb)
   {
     std::unique_lock<std::mutex> lk(m);
     visit(
       [&cb, this](auto&& arg) {
         using U = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<U, std::monostate>)
-          cbs.push_back(std::move(cb));
+          cbs.emplace_back(std::forward<F>(cb));
         else
           cb();
       },
@@ -331,14 +332,15 @@ public:
       std::rethrow_exception(*eptr);
     return static_cast<void>(std::get<void_t>(storage));
   }
-  void then(unique_function<void()> cb)
+  template <typename F, typename = decltype(std::declval<F>()())>
+  void then(F&& cb)
   {
     std::unique_lock<std::mutex> lk(m);
     visit(
       [&cb, this](auto&& arg) {
         using U = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<U, std::monostate>)
-          cbs.push_back(std::move(cb));
+          cbs.emplace_back(std::forward<F>(cb));
         else
           cb();
       },
@@ -378,7 +380,7 @@ bool future<T>::is_ready() const
 
 template <typename T>
 future<T>::future(std::shared_ptr<shared_state<T>> state)
-  : state(state)
+  : state(std::move(state))
 {
 }
 
@@ -403,7 +405,7 @@ public:
   }
   void set_error(std::exception_ptr eptr)
   {
-    state->set_error(eptr);
+    state->set_error(std::move(eptr));
   }
   std::shared_ptr<shared_state<T>> state = std::make_shared<shared_state<T>>();
 };
@@ -422,7 +424,7 @@ public:
   }
   void set_error(std::exception_ptr eptr)
   {
-    state->set_error(eptr);
+    state->set_error(std::move(eptr));
   }
   std::shared_ptr<shared_state<void>> state = std::make_shared<shared_state<void>>();
 };
