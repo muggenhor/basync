@@ -496,118 +496,64 @@ future<std::vector<future<T>>> when(std::vector<future<T>> futures)
   return rv;
 }
 
-namespace detail {
-template <typename T, typename U>
-struct then_impl
-{
-  template <typename F>
-  static future<U> impl(future<T>& t, F&& func, executor& exec)
-  {
-    promise<U> value;
-    auto       rv = value.get_future();
-    t.state->then([&exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
-      exec.queue(
-        [t = std::move(t), value = std::move(value), func = std::forward<F>(func)]() mutable {
-          try
-          {
-            value.set_value(func(std::move(t)));
-          }
-          catch (...)
-          {
-            value.set_error(std::current_exception());
-          }
-        });
-    });
-    return rv;
-  }
-};
-
-template <typename T>
-struct then_impl<T, void>
-{
-  template <typename F>
-  static future<void> impl(future<T>& t, F&& func, executor& exec)
-  {
-    promise<void> value;
-    auto          rv = value.get_future();
-    t.state->then([&exec, t, value = std::move(value), func = std::forward<F>(func)]() mutable {
-      exec.queue(
-        [t = std::move(t), value = std::move(value), func = std::forward<F>(func)]() mutable {
-          try
-          {
-            func(std::move(t));
-            value.set_value();
-          }
-          catch (...)
-          {
-            value.set_error(std::current_exception());
-          }
-        });
-    });
-    return rv;
-  }
-};
-}
-
 template <typename T>
 template <typename F>
 auto future<T>::then(F&&       func,
                      executor& exec) && -> future<decltype(func(std::declval<future<T>>()))>
 {
-  return detail::then_impl<T, decltype(func(std::declval<future<T>>()))>::impl(
-    *this, std::forward<F>(func), exec);
-}
+  using R = decltype(func(std::declval<future<T>>()));
 
-namespace detail {
-template <typename U>
-struct async_impl
-{
-  template <typename F>
-  static future<U> impl(executor& exec, F&& func)
-  {
-    promise<U> value;
-    auto       rv = value.get_future();
-    exec.queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
-      try
-      {
-        value.set_value(func());
-      }
-      catch (...)
-      {
-        value.set_error(std::current_exception());
-      }
+  promise<R> value;
+  auto       rv = value.get_future();
+  this->state->then(
+    [&exec, t = *this, value = std::move(value), func = std::forward<F>(func)]() mutable {
+      exec.queue([t = std::move(t), value = std::move(value), func = std::move(func)]() mutable {
+        try
+        {
+          if constexpr (std::is_void_v<R>)
+          {
+            func(std::move(t));
+            value.set_value();
+          }
+          else
+          {
+            value.set_value(func(std::move(t)));
+          }
+        }
+        catch (...)
+        {
+          value.set_error(std::current_exception());
+        }
+      });
     });
-    return rv;
-  }
-};
-
-template <>
-struct async_impl<void>
-{
-  template <typename F>
-  static future<void> impl(executor& exec, F&& func)
-  {
-    promise<void> value;
-    auto          rv = value.get_future();
-    exec.queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
-      try
-      {
-        func();
-        value.set_value();
-      }
-      catch (...)
-      {
-        value.set_error(std::current_exception());
-      }
-    });
-    return rv;
-  }
-};
+  return rv;
 }
 
 template <typename F>
 auto async(F&& func, executor& exec) -> future<decltype(func())>
 {
-  return detail::async_impl<decltype(func())>::impl(exec, std::forward<F>(func));
+  using R = decltype(func());
+
+  promise<R> value;
+  auto       rv = value.get_future();
+  exec.queue([value = std::move(value), func = std::forward<F>(func)]() mutable {
+    try
+    {
+      if constexpr (std::is_void_v<R>)
+      {
+        func();
+        value.set_value();
+      }
+      else
+      {
+        value.set_value(func());
+      }
+    }
+    catch (...)
+    {
+      value.set_error(std::current_exception());
+    }
+  });
+  return rv;
 }
 }
