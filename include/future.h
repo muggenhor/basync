@@ -210,6 +210,11 @@ executor& default_executor();
 template <typename F>
 auto async(F&& func, executor& exec = default_executor()) -> future<decltype(func())>;
 
+namespace detail {
+template <typename T>
+struct future_factory;
+}
+
 template <typename T>
 class future
 {
@@ -224,9 +229,12 @@ public:
   auto
   then(F&&       func,
        executor& exec = default_executor()) && -> future<decltype(func(std::declval<future<T>>()))>;
-//private:
+
+private:
   future(std::shared_ptr<shared_state<T>> state);
   friend class promise<T>;
+  friend struct detail::future_factory<T>;
+
   std::shared_ptr<shared_state<T>> state;
 };
 
@@ -373,12 +381,39 @@ public:
   mutable std::condition_variable                          cv;
 };
 
+namespace detail {
+template <typename T>
+struct future_factory
+{
+  static future<T> make_ready(T value)
+  {
+    auto state = std::make_shared<shared_state<T>>();
+    state->set(std::forward<T>(value));
+    return future<T>(std::move(state));
+  }
+};
+
+template <>
+struct future_factory<void>
+{
+  static future<void> make_ready()
+  {
+    auto state = std::make_shared<shared_state<void>>();
+    state->set();
+    return future<void>(std::move(state));
+  }
+};
+}
+
 template <typename T>
 future<T> make_ready_future(T value)
 {
-  auto state = std::make_shared<shared_state<T>>();
-  state->set(std::move(value));
-  return future<T>(std::move(state));
+  return detail::future_factory<T>::make_ready(std::forward<T>(value));
+}
+
+inline future<void> make_ready_future()
+{
+  return detail::future_factory<void>::make_ready();
 }
 
 template <typename T>
